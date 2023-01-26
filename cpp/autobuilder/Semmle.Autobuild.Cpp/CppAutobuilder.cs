@@ -33,6 +33,8 @@ namespace Semmle.Autobuild.Cpp
                 new MsBuildRule().Analyse(this, true) |
                 // Then look for a script that might be a build script
                 (() => new BuildCommandAutoRule((_, f) => f(null)).Analyse(this, true)) |
+                // Then try Make
+                (() => new MakefileBuildRule().Analyse(this, true)) |
                 // All attempts failed: print message
                 AutobuildFailure();
         }
