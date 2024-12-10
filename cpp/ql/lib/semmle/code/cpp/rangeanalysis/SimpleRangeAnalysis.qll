@@ -1582,7 +1582,6 @@ private float getGuardedUpperBound(VariableAccess guardedAccess) {
   )
 }
 
-cached
 private module SimpleRangeAnalysisCached {
   /**
    * Gets the lower bound of the expression.
@@ -1596,7 +1595,6 @@ private module SimpleRangeAnalysisCached {
    *
    *    `lowerBound(expr.getFullyConverted())`
    */
-  cached
   float lowerBound(Expr expr) {
     // Combine the lower bounds returned by getTruncatedLowerBounds into a
     // single minimum value.
@@ -1615,7 +1613,6 @@ private module SimpleRangeAnalysisCached {
    *
    *    `upperBound(expr.getFullyConverted())`
    */
-  cached
   float upperBound(Expr expr) {
     // Combine the upper bounds returned by getTruncatedUpperBounds and
     // getGuardedUpperBound into a single maximum value
@@ -1623,7 +1620,6 @@ private module SimpleRangeAnalysisCached {
   }
 
   /** Holds if the upper bound of `expr` may have been widened. This means the upper bound is in practice likely to be overly wide. */
-  cached
   predicate upperBoundMayBeWidened(Expr e) {
     isRecursiveExpr(e) and
     // Widening is not a problem if the post-analysis in `getGuardedUpperBound` has overridden the widening.
@@ -1646,7 +1642,6 @@ private module SimpleRangeAnalysisCached {
    *     }
    *   }
    */
-  cached
   predicate exprWithEmptyRange(Expr expr) {
     analyzableExpr(expr) and
     (
@@ -1657,13 +1652,11 @@ private module SimpleRangeAnalysisCached {
   }
 
   /** Holds if the definition might overflow negatively. */
-  cached
   predicate defMightOverflowNegatively(RangeSsaDefinition def, StackVariable v) {
     getDefLowerBoundsImpl(def, v) < varMinVal(v)
   }
 
   /** Holds if the definition might overflow positively. */
-  cached
   predicate defMightOverflowPositively(RangeSsaDefinition def, StackVariable v) {
     getDefUpperBoundsImpl(def, v) > varMaxVal(v)
   }
@@ -1672,7 +1665,6 @@ private module SimpleRangeAnalysisCached {
    * Holds if the definition might overflow (either positively or
    * negatively).
    */
-  cached
   predicate defMightOverflow(RangeSsaDefinition def, StackVariable v) {
     defMightOverflowNegatively(def, v) or
     defMightOverflowPositively(def, v)
@@ -1697,7 +1689,6 @@ private module SimpleRangeAnalysisCached {
    * does not consider the possibility that the expression might overflow
    * due to a conversion.
    */
-  cached
   predicate exprMightOverflowNegatively(Expr expr) {
     getLowerBoundsImpl(expr) < exprMinVal(expr)
     or
@@ -1718,7 +1709,6 @@ private module SimpleRangeAnalysisCached {
    * `(int16)(x+y)` might overflow due to the `(int16)` cast, rather than
    * due to the addition.
    */
-  cached
   predicate convertedExprMightOverflowNegatively(Expr expr) {
     exprMightOverflowNegatively(expr) or
     convertedExprMightOverflowNegatively(expr.getConversion())
@@ -1729,7 +1719,6 @@ private module SimpleRangeAnalysisCached {
    * does not consider the possibility that the expression might overflow
    * due to a conversion.
    */
-  cached
   predicate exprMightOverflowPositively(Expr expr) {
     getUpperBoundsImpl(expr) > exprMaxVal(expr)
     or
@@ -1750,7 +1739,6 @@ private module SimpleRangeAnalysisCached {
    * `(int16)(x+y)` might overflow due to the `(int16)` cast, rather than
    * due to the addition.
    */
-  cached
   predicate convertedExprMightOverflowPositively(Expr expr) {
     exprMightOverflowPositively(expr) or
     convertedExprMightOverflowPositively(expr.getConversion())
@@ -1761,7 +1749,6 @@ private module SimpleRangeAnalysisCached {
    * negatively). The possibility that the expression might overflow
    * due to an implicit or explicit cast is also considered.
    */
-  cached
   predicate convertedExprMightOverflow(Expr expr) {
     convertedExprMightOverflowNegatively(expr) or
     convertedExprMightOverflowPositively(expr)
