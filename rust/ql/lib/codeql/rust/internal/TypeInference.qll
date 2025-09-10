@@ -226,7 +226,13 @@ module Consistency {
 
   predicate nonUniqueCertainType(AstNode n, TypePath path, Type t) {
     strictcount(CertainTypeInference::inferCertainType(n, path)) > 1 and
-    t = CertainTypeInference::inferCertainType(n, path)
+    t = CertainTypeInference::inferCertainType(n, path) and
+    // Suppress the inconsistency if `n` is a self parameter and the type
+    // mention for the self type has multiple types for a path.
+    not exists(ImplItemNode impl, TypePath selfTypePath |
+      n = impl.getAnAssocItem().(Function).getParamList().getSelfParam() and
+      strictcount(impl.(Impl).getSelfTy().(TypeMention).resolveTypeAt(selfTypePath)) > 1
+    )
   }
 }
 
@@ -250,14 +256,66 @@ private TypeMention getTypeAnnotation(AstNode n) {
   )
 }
 
+/**
+ * Gets the type of the implicitly typed `self` parameter, taking into account
+ * whether the parameter is passed by value or by reference.
+ */
+bindingset[self, suffix, t]
+pragma[inline_late]
+private Type getRefAdjustShorthandSelfType(SelfParam self, TypePath suffix, Type t, TypePath path) {
+  not self.hasTypeRepr() and
+  (
+    if self.isRef()
+    then
+      // `fn f(&self, ...)`
+      path.isEmpty() and
+      result = TRefType()
+      or
+      path = TypePath::cons(TRefTypeParameter(), suffix) and
+      result = t
+    else (
+      // `fn f(self, ...)`
+      path = suffix and
+      result = t
+    )
+  )
+}
+
+pragma[nomagic]
+private Type resolveImplSelfType(Impl i, TypePath path) {
+  result = i.getSelfTy().(TypeMention).resolveTypeAt(path)
+}
+
+/**
+ * Gets the type at `path` of the parameter `self` which uses the [shorthand
+ * syntax][1] which is sugar for an explicit annotation.
+ *
+ * [1]: https://doc.rust-lang.org/stable/reference/items/associated-items.html#r-associated.fn.method.self-pat-shorthands
+ */
+pragma[nomagic]
+private Type inferShorthandSelfType(SelfParam self, TypePath path) {
+  exists(ImplOrTraitItemNode i, TypePath suffix, Type t |
+    self = i.getAnAssocItem().(Function).getParamList().getSelfParam() and
+    result = getRefAdjustShorthandSelfType(self, suffix, t, path)
+  |
+    t = resolveImplSelfType(i, suffix)
+    or
+    t = TSelfTypeParameter(i) and suffix.isEmpty()
+  )
+}
+
 /** Gets the type of `n`, which has an explicit type annotation. */
 pragma[nomagic]
 private Type inferAnnotatedType(AstNode n, TypePath path) {
   result = getTypeAnnotation(n).resolveTypeAt(path)
+  or
+  // The shorthand self syntax (i.e., a self parameter without a type
+  // annotation) is sugar for a self parameter with an annotation.
+  result = inferShorthandSelfType(n, path)
 }
 
 /** Module for inferring certain type information. */
-private module CertainTypeInference {
+module CertainTypeInference {
   pragma[nomagic]
   private predicate callResolvesTo(CallExpr ce, Path p, Function f) {
     p = CallExprImpl::getFunctionPath(ce) and
@@ -286,7 +344,7 @@ private module CertainTypeInference {
   }
 
   pragma[nomagic]
-  Type inferCertainCallExprType(CallExpr ce, TypePath path) {
+  private Type inferCertainCallExprType(CallExpr ce, TypePath path) {
     exists(Type ty, TypePath prefix, Path p | ty = getCertainCallExprType(ce, p, prefix) |
       exists(TypePath suffix, TypeParam tp |
         tp = ty.(TypeParamTypeParameter).getTypeParam() and
@@ -324,13 +382,19 @@ private module CertainTypeInference {
       or
       // A `let` statement with a type annotation is a coercion site and hence
       // is not a certain type equality.
-      exists(LetStmt let | not let.hasTypeRepr() |
-        let.getPat() = n1 and
+      exists(LetStmt let |
+        not let.hasTypeRepr() and
+        // Due to "binding modes" the type of the pattern is not necessarily the
+        // same as the type of the initializer. The pattern being an identifier
+        // pattern is sufficient to ensure that this is not the case.
+        let.getPat().(IdentPat) = n1 and
         let.getInitializer() = n2
       )
       or
       exists(LetExpr let |
-        let.getPat() = n1 and
+        // Similarly as for let statements, we need to rule out binding modes
+        // changing the type.
+        let.getPat().(IdentPat) = n1 and
         let.getScrutinee() = n2
       )
       or
@@ -363,16 +427,32 @@ private module CertainTypeInference {
    */
   pragma[nomagic]
   Type inferCertainType(AstNode n, TypePath path) {
-    exists(TypeMention tm |
-      tm = getTypeAnnotation(n) and
-      result = tm.resolveTypeAt(path)
-    )
+    result = inferAnnotatedType(n, path)
     or
     result = inferCertainCallExprType(n, path)
     or
     result = inferCertainTypeEquality(n, path)
     or
     result = inferLiteralType(n, path, true)
+    or
+    result = inferRefNodeType(n) and
+    path.isEmpty()
+    or
+    result = inferLogicalOperationType(n, path)
+    or
+    result = inferRangeExprType(n) and
+    path.isEmpty()
+    or
+    result = inferTupleRootType(n) and
+    path.isEmpty()
+    or
+    result = inferAsyncBlockExprRootType(n) and
+    path.isEmpty()
+    or
+    result = inferArrayExprType(n) and
+    path.isEmpty()
+    or
+    result = inferCastExprType(n, path)
     or
     infersCertainTypeAt(n, path, result.getATypeParameter())
   }
@@ -420,11 +500,10 @@ private module CertainTypeInference {
 }
 
 private Type inferLogicalOperationType(AstNode n, TypePath path) {
-  exists(Builtins::BuiltinType t, BinaryLogicalOperation be |
+  exists(Builtins::Bool t, BinaryLogicalOperation be |
     n = [be, be.getLhs(), be.getRhs()] and
     path.isEmpty() and
-    result = TStruct(t) and
-    t instanceof Builtins::Bool
+    result = TStruct(t)
   )
 }
 
@@ -441,6 +520,9 @@ private Struct getRangeType(RangeExpr re) {
   or
   re instanceof RangeToExpr and
   result instanceof RangeToStruct
+  or
+  re instanceof RangeFullExpr and
+  result instanceof RangeFullStruct
   or
   re instanceof RangeFromToExpr and
   result instanceof RangeStruct
@@ -471,6 +553,11 @@ private predicate typeEquality(AstNode n1, TypePath prefix1, AstNode n2, TypePat
     n1 = n2.(IfExpr).getABranch()
     or
     n1 = n2.(MatchExpr).getAnArm().getExpr()
+    or
+    exists(LetExpr let |
+      n1 = let.getScrutinee() and
+      n2 = let.getPat()
+    )
     or
     exists(MatchExpr me |
       n1 = me.getScrutinee() and
@@ -567,50 +654,6 @@ private Type inferTypeEquality(AstNode n, TypePath path) {
     typeEquality(n, prefix1, n2, prefix2)
     or
     typeEquality(n2, prefix2, n, prefix1)
-  )
-}
-
-/**
- * Gets the type of the implicitly typed `self` parameter, taking into account
- * whether the parameter is passed by value or by reference.
- */
-bindingset[self, suffix, t]
-pragma[inline_late]
-private Type getRefAdjustImplicitSelfType(SelfParam self, TypePath suffix, Type t, TypePath path) {
-  not self.hasTypeRepr() and
-  (
-    if self.isRef()
-    then
-      // `fn f(&self, ...)`
-      path.isEmpty() and
-      result = TRefType()
-      or
-      path = TypePath::cons(TRefTypeParameter(), suffix) and
-      result = t
-    else (
-      // `fn f(self, ...)`
-      path = suffix and
-      result = t
-    )
-  )
-}
-
-pragma[nomagic]
-private Type resolveImplSelfType(Impl i, TypePath path) {
-  result = i.getSelfTy().(TypeMention).resolveTypeAt(path)
-}
-
-/** Gets the type at `path` of the implicitly typed `self` parameter. */
-pragma[nomagic]
-private Type inferImplicitSelfType(SelfParam self, TypePath path) {
-  exists(ImplOrTraitItemNode i, Function f, TypePath suffix, Type t |
-    f = i.getAnAssocItem() and
-    self = f.getParamList().getSelfParam() and
-    result = getRefAdjustImplicitSelfType(self, suffix, t, path)
-  |
-    t = resolveImplSelfType(i, suffix)
-    or
-    t = TSelfTypeParameter(i) and suffix.isEmpty()
   )
 }
 
@@ -894,11 +937,8 @@ private module CallExprBaseMatchingInput implements MatchingInputSig {
       or
       exists(SelfParam self |
         self = pragma[only_bind_into](this.getParamList().getSelfParam()) and
-        dpos.isSelf()
-      |
+        dpos.isSelf() and
         result = inferAnnotatedType(self, path) // `self` parameter with type annotation
-        or
-        result = inferImplicitSelfType(self, path) // `self` parameter without type annotation
       )
       or
       // For associated functions, we may also need to match type arguments against
@@ -1859,7 +1899,7 @@ private predicate methodCandidate(Type type, string name, int arity, Impl impl) 
  */
 pragma[nomagic]
 private predicate methodCandidateTrait(Type type, Trait trait, string name, int arity, Impl impl) {
-  trait = resolvePath(impl.(ImplItemNode).getTraitPath()) and
+  trait = impl.(ImplItemNode).resolveTraitTy() and
   methodCandidate(type, name, arity, impl)
 }
 
@@ -1870,21 +1910,59 @@ private predicate isMethodCall(MethodCall mc, Type rootType, string name, int ar
   arity = mc.getNumberOfArguments()
 }
 
-private module IsInstantiationOfInput implements IsInstantiationOfInputSig<MethodCall> {
+private module IsInstantiationOfInput implements
+  IsInstantiationOfInputSig<MethodCall, TypeMentionTypeTree>
+{
+  /** Holds if `mc` specifies a trait and might target a method in `impl`. */
   pragma[nomagic]
-  predicate potentialInstantiationOf(MethodCall mc, TypeAbstraction impl, TypeMention constraint) {
+  private predicate methodCallTraitCandidate(MethodCall mc, Impl impl) {
     exists(Type rootType, string name, int arity |
       isMethodCall(mc, rootType, name, arity) and
-      constraint = impl.(ImplTypeAbstraction).getSelfTy()
-    |
       methodCandidateTrait(rootType, mc.getTrait(), name, arity, impl)
-      or
+    )
+  }
+
+  /** Holds if `mc` does not specify a trait and might target a method in `impl`. */
+  pragma[nomagic]
+  private predicate methodCallCandidate(MethodCall mc, Impl impl) {
+    exists(Type rootType, string name, int arity |
       not exists(mc.getTrait()) and
+      isMethodCall(mc, rootType, name, arity) and
       methodCandidate(rootType, name, arity, impl)
     )
   }
 
-  predicate relevantTypeMention(TypeMention constraint) {
+  private predicate relevantTraitVisible(Element mc, Trait trait) {
+    trait = any(ImplItemNode impl | methodCallCandidate(mc, impl)).resolveTraitTy()
+  }
+
+  bindingset[impl]
+  pragma[inline_late]
+  private TypeRepr getImplSelfTy(Impl impl) { result = impl.getSelfTy() }
+
+  pragma[nomagic]
+  predicate potentialInstantiationOf(
+    MethodCall mc, TypeAbstraction impl, TypeMentionTypeTree constraint
+  ) {
+    constraint = getImplSelfTy(impl) and
+    (
+      methodCallTraitCandidate(mc, impl)
+      or
+      methodCallCandidate(mc, impl) and
+      (
+        not exists(impl.(ImplItemNode).resolveTraitTy())
+        or
+        // If the `impl` block implements a trait, that trait must be visible in
+        // order for the `impl` to be valid.
+        exists(Trait trait |
+          pragma[only_bind_into](trait) = impl.(ImplItemNode).resolveTraitTy() and
+          TraitIsVisible<relevantTraitVisible/2>::traitIsVisible(mc, pragma[only_bind_into](trait))
+        )
+      )
+    )
+  }
+
+  predicate relevantTypeMention(TypeMentionTypeTree constraint) {
     exists(Impl impl | methodCandidate(_, _, _, impl) and constraint = impl.getSelfTy())
   }
 }
@@ -2045,14 +2123,16 @@ private predicate methodCallHasNoInherentTarget(MethodCall mc) {
       methodCandidate(rootType, name, arity, impl) and
       not impl.hasTrait()
     |
-      IsInstantiationOf<MethodCall, IsInstantiationOfInput>::isNotInstantiationOf(mc, impl, _)
+      IsInstantiationOf<MethodCall, TypeMentionTypeTree, IsInstantiationOfInput>::isNotInstantiationOf(mc,
+        impl, _)
     )
   )
 }
 
 pragma[nomagic]
 private predicate methodCallHasImplCandidate(MethodCall mc, Impl impl) {
-  IsInstantiationOf<MethodCall, IsInstantiationOfInput>::isInstantiationOf(mc, impl, _) and
+  IsInstantiationOf<MethodCall, TypeMentionTypeTree, IsInstantiationOfInput>::isInstantiationOf(mc,
+    impl, _) and
   if impl.hasTrait() and not exists(mc.getTrait())
   then
     // inherent methods take precedence over trait methods, so only allow
@@ -2193,11 +2273,11 @@ private class AmbigousAssocFunctionCallExpr extends MkAmbigousAssocFunctionCallE
 }
 
 private module AmbigousAssocFuncIsInstantiationOfInput implements
-  IsInstantiationOfInputSig<AmbigousAssocFunctionCallExpr>
+  IsInstantiationOfInputSig<AmbigousAssocFunctionCallExpr, TypeMentionTypeTree>
 {
   pragma[nomagic]
   predicate potentialInstantiationOf(
-    AmbigousAssocFunctionCallExpr ce, TypeAbstraction impl, TypeMention constraint
+    AmbigousAssocFunctionCallExpr ce, TypeAbstraction impl, TypeMentionTypeTree constraint
   ) {
     exists(FunctionCallExpr call, Function resolved, Function cand, int pos |
       ce = MkAmbigousAssocFunctionCallExpr(call, resolved, pos) and
@@ -2223,7 +2303,7 @@ private ItemNode resolveUnambigousFunctionCallTarget(FunctionCallExpr call) {
 pragma[nomagic]
 private Function resolveAmbigousFunctionCallTargetFromIndex(FunctionCallExpr call, int index) {
   exists(Impl impl, int pos, Function resolved |
-    IsInstantiationOf<AmbigousAssocFunctionCallExpr, AmbigousAssocFuncIsInstantiationOfInput>::isInstantiationOf(MkAmbigousAssocFunctionCallExpr(call,
+    IsInstantiationOf<AmbigousAssocFunctionCallExpr, TypeMentionTypeTree, AmbigousAssocFuncIsInstantiationOfInput>::isInstantiationOf(MkAmbigousAssocFunctionCallExpr(call,
         resolved, pos), impl, _) and
     result = call.getAnAmbigousCandidateRanked(impl, pos, resolved, index)
   |
@@ -2354,20 +2434,11 @@ private module Cached {
       else any()
     ) and
     (
-      result = inferAnnotatedType(n, path)
-      or
-      result = inferLogicalOperationType(n, path)
-      or
       result = inferAssignmentOperationType(n, path)
       or
       result = inferTypeEquality(n, path)
       or
-      result = inferImplicitSelfType(n, path)
-      or
       result = inferStructExprType(n, path)
-      or
-      result = inferTupleRootType(n) and
-      path.isEmpty()
       or
       result = inferPathExprType(n, path)
       or
@@ -2375,23 +2446,11 @@ private module Cached {
       or
       result = inferFieldExprType(n, path)
       or
-      result = inferRefNodeType(n) and
-      path.isEmpty()
-      or
       result = inferTryExprType(n, path)
       or
       result = inferLiteralType(n, path, false)
       or
-      result = inferAsyncBlockExprRootType(n) and
-      path.isEmpty()
-      or
       result = inferAwaitExprType(n, path)
-      or
-      result = inferArrayExprType(n) and
-      path.isEmpty()
-      or
-      result = inferRangeExprType(n) and
-      path.isEmpty()
       or
       result = inferIndexExprType(n, path)
       or
@@ -2400,8 +2459,6 @@ private module Cached {
       result = inferDynamicCallExprType(n, path)
       or
       result = inferClosureExprType(n, path)
-      or
-      result = inferCastExprType(n, path)
       or
       result = inferStructPatType(n, path)
       or
@@ -2444,9 +2501,9 @@ private module Debug {
     Input2::conditionSatisfiesConstraint(abs, condition, constraint)
   }
 
-  predicate debugInferImplicitSelfType(SelfParam self, TypePath path, Type t) {
+  predicate debugInferShorthandSelfType(SelfParam self, TypePath path, Type t) {
     self = getRelevantLocatable() and
-    t = inferImplicitSelfType(self, path)
+    t = inferShorthandSelfType(self, path)
   }
 
   predicate debugInferCallExprBaseType(AstNode n, TypePath path, Type t) {

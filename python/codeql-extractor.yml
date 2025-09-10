@@ -5,6 +5,8 @@ column_kind: utf32
 overlay_support_version: 20250626
 build_modes:
   - none
+default_queries:
+  - codeql/python-queries
 github_api_languages:
   - Python
 scc_languages:
