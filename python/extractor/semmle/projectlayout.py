@@ -12,6 +12,7 @@ import collections
 import re
 from functools import total_ordering
 import sys
+from pathlib import PureWindowsPath
 import os
 
 def get_renamer(filename):
@@ -19,6 +20,8 @@ def get_renamer(filename):
     def rename(path):
         renamed = layout.artificial_path(path)
         return path if renamed is None else renamed
+    if os.name == "nt":
+        return lambda path: rename(PureWindowsPath(path).as_posix())
     return rename
 
 def load(filename):
